@@ -14,6 +14,7 @@
 #define SECS_PER_HOUR (3600UL)
 #define SECS_PER_DAY  (SECS_PER_HOUR * 24L)
 #define TELEMETRY_INTERVAL (15000)
+#define SSDV_INTERVAL      (600000)
 
 /* Useful Macros for getting elapsed time */
 #define numberOfSeconds(_time_) (_time_ % SECS_PER_MIN)  
@@ -31,36 +32,78 @@
 #include <util/crc16.h>
 #include <Wire.h>
 #include "MPL3115A2.h"
+#include <Adafruit_VC0706.h>
+#include <SoftwareSerial.h>
+#include "ssdv.h"
+#include "config.h"
+#include "rtty.h"
 
 char datastring[80];
 char time_str[9+1];
 char temp_str[15+1];
 char temp_str_aux[7+1];
 char press_str[15+1];
-char press_str_aux[7+1];
+char press_str_aux[15+1];
 char alt_str[15+1];
 char alt_str_aux[7+1];
 char checksum_str[5+1];
 
-unsigned long previousMillis = 0;
+char debug_str[31+1];
+
+unsigned long previousTelemetryMillis = 0;
+unsigned long previousSSDVMillis = 0;
+
+int telemetrySent = 0;
+int errorstatus=0;
+unsigned char cameracode = 0x00;
 
 //Create an instance of the object
 MPL3115A2 myPressure;
 
+SoftwareSerial cameraconnection = SoftwareSerial(8, 5);
+Adafruit_VC0706 cam = Adafruit_VC0706(&cameraconnection);
+
 void setup() {
+  pinMode(RADIOPIN,OUTPUT);
+
+  //rtx_init();
+
+  Serial.begin(9600);
+  Serial.println("VC0706 Camera snapshot test");
+
   Wire.begin();        // Join i2c bus
   myPressure.begin(); // Get sensor online
 
-  pinMode(RADIOPIN,OUTPUT);
   setKoroliovPwmFrequency();
   analogReference(INTERNAL);
+
+  pinMode(4, INPUT);
+  pinMode(6,OUTPUT);
+  // Try to locate the camera
+  if (cam.begin()) {
+    Serial.println("Camera Found:");
+  } 
+  else {
+    Serial.println("No camera found?");
+    return;
+  }
+  // Print out the camera version information (optional)
+  char *reply = cam.getVersion();
+  if (reply == 0) {
+    Serial.print("Failed to get version");
+  } 
+  else {
+    Serial.println("-----------------");
+    Serial.print(reply);
+    Serial.println("-----------------");
+  }
 }
 
 void loop() {
   unsigned long currentMillis = millis();
 
-  if (currentMillis - previousMillis > TELEMETRY_INTERVAL) {
-    previousMillis = currentMillis;
+  if ((currentMillis - previousTelemetryMillis) > TELEMETRY_INTERVAL ) {
+    previousTelemetryMillis = currentMillis;
 
     /* CALLSIGN */
     snprintf(datastring,80,"$$KRLV"); // Puts the text in the datastring
@@ -70,7 +113,7 @@ void loop() {
     int hours = numberOfHours(time);
     int minutes = numberOfMinutes(time);
     int seconds = numberOfSeconds(time);
-    sprintf(time_str, "|%02d:%02d:%02d", hours, minutes, seconds);
+    sprintf(time_str, ",%02d:%02d:%02d", hours, minutes, seconds);
     strcat(datastring,time_str);
 
     /* Telemtry Data */
@@ -86,7 +129,7 @@ void loop() {
     voltage = voltage/1024.0;
     temperature = (voltage-0.5)*100;
     dtostrf(temperature, 5, 2, temp_str_aux);
-    sprintf(temp_str, "|%sC", temp_str_aux);
+    sprintf(temp_str, ",%sC", temp_str_aux);
     strcat(datastring,temp_str);
 
     /* MPL3115A2 Pressure, Temperature and Altitude */
@@ -96,100 +139,120 @@ void loop() {
     pressure = myPressure.readPressure();
     temperature = myPressure.readTemp();
 
-    dtostrf(pressure, 9, 2, press_str_aux);
-    sprintf(press_str, "|%sPa", press_str_aux);
-    strcat(datastring,press_str);
+    //dtostrf(pressure, 9, 2, press_str_aux);
+    //sprintf(press_str, ",%sPa", press_str_aux);
+    //strcat(datastring,press_str);
 
     dtostrf(temperature, 5, 2, temp_str_aux);
-    sprintf(temp_str, "|%sC", temp_str_aux);
+    sprintf(temp_str, ",%sC", temp_str_aux);
     strcat(datastring,temp_str);
 
     myPressure.setModeAltimeter(); // Measure altitude above sea level in meters
     myPressure.setOversampleRate(7); // Set Oversample to the recommended 128
     myPressure.enableEventFlags(); // Enable all three pressure and temp event flags 
-    
-    altitude = myPressure.readAltitude();
-    
+
+      altitude = myPressure.readAltitude();
+
     dtostrf(altitude, 5, 2, alt_str_aux);
-    sprintf(alt_str, "|%sM", alt_str_aux);
+    sprintf(alt_str, ",%sM", alt_str_aux);
     strcat(datastring,alt_str);
 
     /* CRC16 checksum */
     unsigned int CHECKSUM = gps_CRC16_checksum(datastring); // Calculates the checksum for this datastring
     sprintf(checksum_str, "*%04X\n", CHECKSUM);
     strcat(datastring,checksum_str);
-    rtty_txstring (datastring);
+    rtx_string (datastring);
+
+    telemetrySent++;
+  }  
+
+  if (telemetrySent >= 1) {
+    telemetrySent = 0;
+    rtty_tximage();
   }
 }
 
-void rtty_txstring (char * string)
+void rtty_tximage(void)
 {
+  static char setup = 0;
+  static uint8_t img_id = 0;
+  static ssdv_t ssdv;
+  static uint8_t pkt[SSDV_PKT_SIZE];
+  static uint8_t img[32];
+  int r;
 
-  /* Simple function to sent a char at a time to
-   ** rtty_txbyte function.
-   ** NB Each char is one byte (8 Bits)
-   */
+  static uint8_t imgsize; 
+  static uint16_t jpglen;
 
-  char c;
-
-  c = *string++;
-
-  while ( c != '\0')
+  if(!setup)
   {
-    rtty_txbyte (c);
-    c = *string++;
-  }
-}
-void rtty_txbyte (char c)
-{
-  /* Simple function to sent each bit of a char to
-   ** rtty_txbit function.
-   ** NB The bits are sent Least Significant Bit first
-   **
-   ** All chars should be preceded with a 0 and
-   ** proceed with a 1. 0 = Start bit; 1 = Stop bit
-   **
-   */
+    setup = -1;
+    cam.setImageSize(VC0706_320x240);
 
-  int i;
+    imgsize = cam.getImageSize();
 
-  rtty_txbit (0); // Start bit
+    if (cam.takePicture()) {
+      jpglen = cam.frameLength();
 
-  // Send bits for for char LSB first
+      sprintf(debug_str, "$$KRLV,Image size: %d\n", imgsize);
+      rtx_string (debug_str);
 
-  for (i=0;i<7;i++) // Change this here 7 or 8 for ASCII-7 / ASCII-8
-  {
-    if (c & 1) rtty_txbit(1);
+      sprintf(debug_str, "$$KRLV,Frame length: %d\n", jpglen);
+      rtx_string (debug_str);
+    }
+    else {
+      sprintf(debug_str, "$$KRLV,takePicture() failed: %d\n");
+      rtx_string (debug_str);
+    }
 
-    else rtty_txbit(0);
+    errorstatus = sizeof(ssdv_t);
 
-    c = c >> 1;
-
-  }
-  rtty_txbit (1); // Stop bit
-  rtty_txbit (1); // Stop bit
-}
-
-void rtty_txbit (int bit)
-{
-  if (bit)
-  {
-    // high
-    analogWrite(RADIOPIN,110);
-  }
-  else
-  {
-    // low
-    analogWrite(RADIOPIN,100);
-
+    ssdv_enc_init(&ssdv, RTTY_CALLSIGN, img_id++);
+    ssdv_enc_set_buffer(&ssdv, pkt);                  
   }
 
-  // delayMicroseconds(3370); // 300 baud
-  delayMicroseconds(10000); // For 50 Baud uncomment this and the line below.
-  delayMicroseconds(10150); // You can't do 20150 it just doesn't work as the
-  // largest value that will produce an accurate delay is 16383
-  // See : http://arduino.cc/en/Reference/DelayMicroseconds
+  while((r = ssdv_enc_get_packet(&ssdv)) == SSDV_FEED_ME)
+  {
+    uint8_t *buffer; 
+    uint8_t bytesToRead = min(32, jpglen); // change 32 to 64 for a speedup but may not work with all setups!
+    buffer = cam.readPicture(bytesToRead);
 
+    //size_t r = c3_read(img, 64);
+    //if(r == 0) break;
+
+    ssdv_enc_feed(&ssdv, buffer, bytesToRead);
+    jpglen -= bytesToRead;
+
+    //rtx_string("$$" RTTY_CALLSIGN ":ssdv_enc_get_packet() SSDV_FEED_ME failed again\n");
+  }
+
+  if(r != SSDV_OK)
+  {
+    sprintf(debug_str, "$$KRLV,r != SSDV_OK, r=%d, s->width=%d, s->height=%d\n", r, ssdv.width, ssdv.height);
+    rtx_string (debug_str);
+    // Something went wrong! //
+    //c3_close();
+    //setup = 0;
+    //rtx_string_P(PSTR("$$" RTTY_CALLSIGN ":ssdv_enc_get_packet() failed again\n"));
+    //rtx_string("$$" RTTY_CALLSIGN ":ssdv_enc_get_packet() failed again\n");
+    //snprintf_P((char *) img, 64, PSTR("$$" RTTY_CALLSIGN ":Camera error %d\n"), r);
+    //rtx_string((char *) img);
+    //return(setup);
+    setup = 0;
+    cam.resumeVideo();
+  }
+
+  if(!(jpglen > 0))
+  {
+    // The end of the image has been reached //
+    //c3_close();
+    setup = 0;
+    cam.resumeVideo();
+  }
+
+  cameracode = r;
+  // Got the packet! Transmit it //
+  rtx_data(pkt, SSDV_PKT_SIZE);
 }
 
 uint16_t gps_CRC16_checksum (char *string) {
@@ -249,4 +312,5 @@ void setPwmFrequency(int pin, int divisor) {
  TCCR1B = TCCR1B & 0b11111000 | mode;
  }
  */
+
 
