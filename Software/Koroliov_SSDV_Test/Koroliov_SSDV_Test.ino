@@ -1,11 +1,12 @@
 /*
 
- Based on the demo code to drive NTX2B via PWM by Anthony Stirk M0UPU.
- RTTY code from Rob Harrison Icarus Project.
+ RTTY code by Philip Heron <phil@sanslogic.co.uk> https://github.com/fsphil/
+ Arduino project structure based on the CUBEX project by https://github.com/arkorobotics/
  
- Special thanks to http://ukhas.org.uk
+ Special thanks to http://ukhas.org.uk and the people in the IRC.
  
  MPL3115A2 code by Nathan Seidle from Sparkfun.
+ Camera code by Adafruit.
  
  */
 
@@ -13,8 +14,8 @@
 #define SECS_PER_MIN  (60UL)
 #define SECS_PER_HOUR (3600UL)
 #define SECS_PER_DAY  (SECS_PER_HOUR * 24L)
-#define TELEMETRY_INTERVAL (15000)
-#define SSDV_INTERVAL      (600000)
+#define TELEMETRY_INTERVAL (60*1000)
+#define SSDV_INTERVAL      (50)
 
 /* Useful Macros for getting elapsed time */
 #define numberOfSeconds(_time_) (_time_ % SECS_PER_MIN)  
@@ -97,79 +98,89 @@ void setup() {
     Serial.print(reply);
     Serial.println("-----------------");
   }
+
+  /* Send some stuff so we can configure the receiver */
+  while (telemetrySent++ < 20) {
+    rtty_txtelemetry(millis());
+    delay(50);
+  }
 }
 
 void loop() {
+
   unsigned long currentMillis = millis();
 
   if ((currentMillis - previousTelemetryMillis) > TELEMETRY_INTERVAL ) {
     previousTelemetryMillis = currentMillis;
-
-    /* CALLSIGN */
-    snprintf(datastring,80,"$$KRLV"); // Puts the text in the datastring
-
-    /* Time */
-    unsigned long time = currentMillis/1000;
-    int hours = numberOfHours(time);
-    int minutes = numberOfMinutes(time);
-    int seconds = numberOfSeconds(time);
-    sprintf(time_str, ",%02d:%02d:%02d", hours, minutes, seconds);
-    strcat(datastring,time_str);
-
-    /* Telemtry Data */
-    float temperature = 0.0;
-    float voltage = 0.0;
-    int temperatureReading = 0;
-    float pressure = 0.0;
-    float altitude = 0.0;
-
-    /* TMP36 Temperature */
-    temperatureReading = analogRead(TMP36PIN);
-    voltage = temperatureReading * 2.56;
-    voltage = voltage/1024.0;
-    temperature = (voltage-0.5)*100;
-    dtostrf(temperature, 5, 2, temp_str_aux);
-    sprintf(temp_str, ",%sC", temp_str_aux);
-    strcat(datastring,temp_str);
-
-    /* MPL3115A2 Pressure, Temperature and Altitude */
-    myPressure.setModeBarometer(); // Measure pressure in Pascals from 20 to 110 kPa
-    myPressure.setOversampleRate(7); // Set Oversample to the recommended 128
-    myPressure.enableEventFlags(); // Enable all three pressure and temp event flags 
-    pressure = myPressure.readPressure();
-    temperature = myPressure.readTemp();
-
-    //dtostrf(pressure, 9, 2, press_str_aux);
-    //sprintf(press_str, ",%sPa", press_str_aux);
-    //strcat(datastring,press_str);
-
-    dtostrf(temperature, 5, 2, temp_str_aux);
-    sprintf(temp_str, ",%sC", temp_str_aux);
-    strcat(datastring,temp_str);
-
-    myPressure.setModeAltimeter(); // Measure altitude above sea level in meters
-    myPressure.setOversampleRate(7); // Set Oversample to the recommended 128
-    myPressure.enableEventFlags(); // Enable all three pressure and temp event flags 
-
-      altitude = myPressure.readAltitude();
-
-    dtostrf(altitude, 5, 2, alt_str_aux);
-    sprintf(alt_str, ",%sM", alt_str_aux);
-    strcat(datastring,alt_str);
-
-    /* CRC16 checksum */
-    unsigned int CHECKSUM = gps_CRC16_checksum(datastring); // Calculates the checksum for this datastring
-    sprintf(checksum_str, "*%04X\n", CHECKSUM);
-    strcat(datastring,checksum_str);
-    rtx_string (datastring);
-
-    telemetrySent++;
+    rtty_txtelemetry(currentMillis);
   }  
 
-  if (telemetrySent >= 1) {
-    telemetrySent = 0;
+  if ((currentMillis - previousSSDVMillis) > SSDV_INTERVAL ) {
+    previousSSDVMillis = currentMillis;
     rtty_tximage();
   }
+}
+
+void rtty_txtelemetry(unsigned long currentMillis)
+{
+  /* CALLSIGN */
+  snprintf(datastring,80,"$$KRLV"); // Puts the text in the datastring
+
+  /* Time */
+  unsigned long time = currentMillis/1000;
+  int hours = numberOfHours(time);
+  int minutes = numberOfMinutes(time);
+  int seconds = numberOfSeconds(time);
+  sprintf(time_str, ",%02d:%02d:%02d", hours, minutes, seconds);
+  strcat(datastring,time_str);
+
+  /* Telemtry Data */
+  float temperature = 0.0;
+  float voltage = 0.0;
+  int temperatureReading = 0;
+  float pressure = 0.0;
+  float altitude = 0.0;
+
+  /* TMP36 Temperature */
+  temperatureReading = analogRead(TMP36PIN);
+  voltage = temperatureReading * 2.56;
+  voltage = voltage/1024.0;
+  temperature = (voltage-0.5)*100;
+  dtostrf(temperature, 5, 2, temp_str_aux);
+  sprintf(temp_str, ",%sC", temp_str_aux);
+  strcat(datastring,temp_str);
+
+  /* MPL3115A2 Pressure, Temperature and Altitude */
+  myPressure.setModeBarometer(); // Measure pressure in Pascals from 20 to 110 kPa
+  myPressure.setOversampleRate(7); // Set Oversample to the recommended 128
+  myPressure.enableEventFlags(); // Enable all three pressure and temp event flags 
+  pressure = myPressure.readPressure();
+  temperature = myPressure.readTemp();
+
+  //dtostrf(pressure, 9, 2, press_str_aux);
+  //sprintf(press_str, ",%sPa", press_str_aux);
+  //strcat(datastring,press_str);
+
+  dtostrf(temperature, 5, 2, temp_str_aux);
+  sprintf(temp_str, ",%sC", temp_str_aux);
+  strcat(datastring,temp_str);
+
+  myPressure.setModeAltimeter(); // Measure altitude above sea level in meters
+  myPressure.setOversampleRate(7); // Set Oversample to the recommended 128
+  myPressure.enableEventFlags(); // Enable all three pressure and temp event flags 
+
+    altitude = myPressure.readAltitude();
+
+  dtostrf(altitude, 5, 2, alt_str_aux);
+  sprintf(alt_str, ",%sM", alt_str_aux);
+  strcat(datastring,alt_str);
+
+  /* CRC16 checksum */
+  unsigned int CHECKSUM = gps_CRC16_checksum(datastring); // Calculates the checksum for this datastring
+  sprintf(checksum_str, "*%04X\n", CHECKSUM);
+  strcat(datastring,checksum_str);
+
+  rtx_string (datastring);
 }
 
 void rtty_tximage(void)
@@ -188,20 +199,15 @@ void rtty_tximage(void)
   {
     setup = -1;
     cam.setImageSize(VC0706_320x240);
+    cam.setCompression(255);
 
     imgsize = cam.getImageSize();
 
     if (cam.takePicture()) {
       jpglen = cam.frameLength();
-
-      sprintf(debug_str, "$$KRLV,Image size: %d\n", imgsize);
-      rtx_string (debug_str);
-
-      sprintf(debug_str, "$$KRLV,Frame length: %d\n", jpglen);
-      rtx_string (debug_str);
     }
     else {
-      sprintf(debug_str, "$$KRLV,takePicture() failed: %d\n");
+      sprintf(debug_str, "$$KRLV,CAM FAILED\n");
       rtx_string (debug_str);
     }
 
@@ -217,35 +223,18 @@ void rtty_tximage(void)
     uint8_t bytesToRead = min(32, jpglen); // change 32 to 64 for a speedup but may not work with all setups!
     buffer = cam.readPicture(bytesToRead);
 
-    //size_t r = c3_read(img, 64);
-    //if(r == 0) break;
-
     ssdv_enc_feed(&ssdv, buffer, bytesToRead);
     jpglen -= bytesToRead;
-
-    //rtx_string("$$" RTTY_CALLSIGN ":ssdv_enc_get_packet() SSDV_FEED_ME failed again\n");
   }
 
   if(r != SSDV_OK)
   {
-    sprintf(debug_str, "$$KRLV,r != SSDV_OK, r=%d, s->width=%d, s->height=%d\n", r, ssdv.width, ssdv.height);
-    rtx_string (debug_str);
-    // Something went wrong! //
-    //c3_close();
-    //setup = 0;
-    //rtx_string_P(PSTR("$$" RTTY_CALLSIGN ":ssdv_enc_get_packet() failed again\n"));
-    //rtx_string("$$" RTTY_CALLSIGN ":ssdv_enc_get_packet() failed again\n");
-    //snprintf_P((char *) img, 64, PSTR("$$" RTTY_CALLSIGN ":Camera error %d\n"), r);
-    //rtx_string((char *) img);
-    //return(setup);
     setup = 0;
     cam.resumeVideo();
   }
 
   if(!(jpglen > 0))
   {
-    // The end of the image has been reached //
-    //c3_close();
     setup = 0;
     cam.resumeVideo();
   }
@@ -277,40 +266,8 @@ void setKoroliovPwmFrequency() {
   TCCR1B = TCCR1B & 0b11111000 | 0x01;
 }
 
-/*
-void setPwmFrequency(int pin, int divisor) {
- 
- byte mode;
- if(pin == 5 || pin == 6 || pin == 9 || pin == 10) {
- switch(divisor) {
- case 1:
- mode = 0x01;
- break;
- case 8:
- mode = 0x02;
- break;
- case 64:
- mode = 0x03;
- break;
- case 256:
- mode = 0x04;
- break;
- case 1024:
- mode = 0x05;
- break;
- default:
- return;
- }
- if(pin == 5 || pin == 6) {
- TCCR0B = TCCR0B & 0b11111000 | mode;
- }
- else {
- TCCR1B = TCCR1B & 0b11111000 | mode;
- }
- }
- 
- TCCR1B = TCCR1B & 0b11111000 | mode;
- }
- */
+
+
+
 
 

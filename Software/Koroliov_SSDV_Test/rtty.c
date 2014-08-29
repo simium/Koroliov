@@ -75,8 +75,21 @@ void rtty_txbit (int bit)
   }
 
   //delayMicroseconds(6800); // 150 baud
-  delayMicroseconds(10000); // For 50 Baud uncomment this and the line below.
-  delayMicroseconds(10150); // You can't do 20150 it just doesn't work as the
+  if (RTTY_BAUD == 50) {
+    delayMicroseconds(10000);
+    delayMicroseconds(10150);
+  }
+  else if (RTTY_BAUD == 100) {
+    delayMicroseconds(10000/2);
+    delayMicroseconds(10150/2);
+  }
+  else if (RTTY_BAUD == 300) {
+        delayMicroseconds(3380);
+  }
+  else { // Assume 50 baud
+    delayMicroseconds(10000);
+    delayMicroseconds(10150);
+  }
   // largest value that will produce an accurate delay is 16383
   // See : http://arduino.cc/en/Reference/DelayMicroseconds
 

@@ -7,7 +7,7 @@
 #define ASCII 8          // ASCII 7 or 8
 #define STOPBITS 2       // Either 1 or 2
 #define TXDELAY 0        // Delay between sentence TX's
-#define RTTY_BAUD 50     // Baud rate for use with RFM22B Max = 600
+#define RTTY_BAUD 300     // Baud rate for use with RFM22B Max = 600
 
 #define TX_DELAY      300   // default was 300
 
