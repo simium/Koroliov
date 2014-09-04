@@ -14,7 +14,7 @@
 #define SECS_PER_MIN  (60UL)
 #define SECS_PER_HOUR (3600UL)
 #define SECS_PER_DAY  (SECS_PER_HOUR * 24L)
-#define TELEMETRY_INTERVAL (60*1000)
+#define TELEMETRY_INTERVAL (30*1000)
 #define SSDV_INTERVAL      (50)
 
 /* Useful Macros for getting elapsed time */
