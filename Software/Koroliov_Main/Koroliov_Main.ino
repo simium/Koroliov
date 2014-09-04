@@ -20,85 +20,96 @@
 #include "config.h"
 #include "rtty.h"
 
+#include <avr/wdt.h>
+
 char datastring[80];
 char temp_str[16+1];
 char temp_str_aux[16+1];
 char checksum_str[5+1];
 
-unsigned long previousTelemetryMillis = 0;
-unsigned long previousSSDVMillis = 0;
-
-int errorstatus=0;
+int errorstatus=SSDV_ERROR;
 unsigned char cameracode = 0x00;
-int telemetry_sent = 0;
-unsigned long currentMillis;
 
-SoftwareSerial camera_connection(8, 5);
+SoftwareSerial camera_connection(CAM_RX_PIN, CAM_TX_PIN);
 Adafruit_VC0706 cam = Adafruit_VC0706(&camera_connection);
 
 Adafruit_GPS GPS(&Serial1);
 HardwareSerial mySerial = Serial1;
 
-boolean usingInterrupt = false;
-void useInterrupt(boolean); // Func prototype keeps Arduino 0023 happy
-
 _payload Koroliov;
 
-int first_boot = 1;
+static unsigned long previousTelemetrySeconds;
+static unsigned long previousSSDVSeconds;
 
 void setup() {
   pinMode(RADIO_TX_PIN,OUTPUT);
+  pinMode(CUTDOWN_PIN, OUTPUT);
 
   setKoroliovPwmFrequency();
   analogReference(INTERNAL);
 
   /* Fix for CAM RX bug */
-  pinMode(4, INPUT);
+  pinMode(OLD_CAM_RX_PIN, INPUT);
 
   // Turn on the camera
   cam.begin();
 
   // Turn on the GPS
   GPS.begin(9600);
-  //GPS.begin(4800);
-
-  delay(100);
-  GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
-  delay(50);
+  GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_ALLDATA);
   GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);   // 1 Hz update rate
-  delay(50);
 
-  useInterrupt(true);
+  Koroliov.descending = false;
 
-  while (Koroliov.sentence_id < 10) {
+  int i = 0;
+
+  while (i<5) {
     if (update_payload_status(&Koroliov) != 0) {
       rtty_txtelemetry(&Koroliov);
-      delay(2000);
+      delay(1000);
+      i++;
     }
   }
 
+  wdt_enable(WDTO_8S);
 }
 
 void loop() {
-  currentMillis = millis();
+  unsigned long currentSeconds = millis()/1000;
 
-  if ((currentMillis - previousTelemetryMillis) > TELEMETRY_INTERVAL ) {
-    previousTelemetryMillis = millis();
-    
-    if (update_payload_status(&Koroliov) != 0) {
-      rtty_txtelemetry(&Koroliov);
-    }
-  }  
+  if ((currentSeconds - previousTelemetrySeconds) >= TELEMETRY_INTERVAL) {
+    previousTelemetrySeconds = millis()/1000;
+    while(!update_payload_status(&Koroliov));
+    rtty_txtelemetry(&Koroliov);
+  }
 
-  if ((currentMillis - previousSSDVMillis) > SSDV_INTERVAL) {
-    previousSSDVMillis = millis();
+  if ((currentSeconds - previousSSDVSeconds) >= SSDV_INTERVAL && (int)Koroliov.gps_altitude >= 500) {
+    previousSSDVSeconds = millis()/1000;
     rtty_tximage();
   }
+
+  /* Cutdown <- altitude >= 30000m and more than 7200 seconds passed since boot (almost 2 hours) */
+  if ((int)Koroliov.gps_altitude >= 30000 && currentSeconds > 6000 && Koroliov.descending == false) {
+    wdt_disable();
+    digitalWrite(CUTDOWN_PIN, HIGH);
+    delay(10*1000);
+    digitalWrite(CUTDOWN_PIN, LOW);
+    wdt_enable(WDTO_8S);
+
+    Koroliov.descending = true;
+  }
+
+  wdt_reset();
 }
 
 int update_payload_status(struct _payload* payload) {
   int status = 0;
-  
+
+  char c = GPS.read();
+  while (c!=0) {
+    c = GPS.read();
+  }
+
   if (GPS.newNMEAreceived()) {
     if (GPS.parse(GPS.lastNMEA())) {
       status = 1;
@@ -111,18 +122,17 @@ int update_payload_status(struct _payload* payload) {
       payload->gps_seconds = GPS.seconds;
       payload->gps_latitude = GPS.latitude;
       payload->gps_longitude = GPS.longitude;
-      payload->gps_altitude = (uint16_t) GPS.altitude;
+      payload->gps_previous_altitude = payload->gps_altitude;
+      payload->gps_altitude = GPS.altitude;
 
       /* TMP36 - Internal temperature */
-      int temperatureReading = analogRead(TMP36PIN);
+      int temperatureReading = analogRead(TMP36_PIN);
       float voltage = temperatureReading * 2.56;
       voltage = voltage/1024.0;
 
       payload->internal_temperature = (voltage-0.5)*100;
     }
   }
-
-
 
   return status;
 }
@@ -133,7 +143,7 @@ void rtty_txtelemetry(struct _payload* payload) {
   snprintf(datastring,80,"$$KRLV"); // Puts the text in the datastring
 
   /* Sentence ID */
-  sprintf(temp_str, ",%03d", payload->sentence_id);
+  sprintf(temp_str, ",%lu", payload->running_millis/1000);
   strcat(datastring,temp_str);
 
   /* Time */
@@ -151,7 +161,8 @@ void rtty_txtelemetry(struct _payload* payload) {
   strcat(datastring,temp_str);
 
   /* Altitude */
-  sprintf(temp_str, ",%d", payload->gps_altitude);
+  dtostrf(payload->gps_altitude, 0, 1, temp_str_aux);
+  sprintf(temp_str, ",%s", temp_str_aux);
   strcat(datastring,temp_str);
 
   /* Internal Temperature */
@@ -161,7 +172,7 @@ void rtty_txtelemetry(struct _payload* payload) {
 
   /* CRC16 checksum */
   unsigned int CHECKSUM = gps_CRC16_checksum(datastring); // Calculates the checksum for this datastring
-  sprintf(checksum_str, "*%04X\n", CHECKSUM);
+  sprintf(checksum_str, "*%04X\n\0", CHECKSUM);
   strcat(datastring,checksum_str);
 
   rtx_string (datastring);
@@ -182,7 +193,10 @@ void rtty_tximage(void)
   if(!setup)
   {
     setup = -1;
-    
+
+    wdt_reset();
+
+    cam.reset();
     cam.setImageSize(VC0706_320x240);
     cam.setCompression(255);
 
@@ -192,12 +206,8 @@ void rtty_tximage(void)
       jpglen = cam.frameLength();
     }
     else {
-      sprintf(temp_str, "$$KRLV,CAMERROR\n");
-      rtx_string (temp_str);
       jpglen = 0;
     }
-
-    errorstatus = sizeof(ssdv_t);
 
     ssdv_enc_init(&ssdv, RTTY_CALLSIGN, img_id++);
     ssdv_enc_set_buffer(&ssdv, pkt);                  
@@ -211,21 +221,18 @@ void rtty_tximage(void)
 
     ssdv_enc_feed(&ssdv, buffer, bytesToRead);
     jpglen -= bytesToRead;
+
+    wdt_reset();
   }
 
-  if(r != SSDV_OK)
-  {
-    setup = 0;
-    cam.resumeVideo();
-  }
-
-  if(!(jpglen > 0))
+  if(r != SSDV_OK || !(jpglen > 0))
   {
     setup = 0;
     cam.resumeVideo();
   }
 
   cameracode = r;
+
   // Got the packet! Transmit it //
   rtx_data(pkt, SSDV_PKT_SIZE);
 }
@@ -252,24 +259,7 @@ void setKoroliovPwmFrequency() {
   TCCR1B = TCCR1B & 0b11111000 | 0x01;
 }
 
-// Interrupt is called once a millisecond, looks for any new GPS data, and stores it
-SIGNAL(TIMER0_COMPA_vect) {
-  char c = GPS.read();
-}
 
-void useInterrupt(boolean v) {
-  if (v) {
-    // Timer0 is already used for millis() - we'll just interrupt somewhere
-    // in the middle and call the "Compare A" function above
-    OCR0A = 0x57;
-    TIMSK0 |= _BV(OCIE0A);
-    usingInterrupt = true;
-  } else {
-    // do not call the interrupt function COMPA anymore
-    TIMSK0 &= ~_BV(OCIE0A);
-    usingInterrupt = false;
-  }
-}
 
 
 

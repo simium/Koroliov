@@ -25,6 +25,7 @@
 #include "rtty.h"
 #include "timeout.h"
 #include "Arduino.h"
+#include <avr/wdt.h>
 
 volatile static uint8_t  txpgm = 0;
 volatile static uint8_t *txbuf = 0;
@@ -58,6 +59,8 @@ void rtty_txbyte (char c)
   }
   rtty_txbit (1); // Stop bit
   rtty_txbit (1); // Stop bit
+  
+  wdt_reset();
 }
 
 void rtty_txbit (int bit)
